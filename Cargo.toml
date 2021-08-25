@@ -3,6 +3,8 @@ name = "fi-night"
 version = "0.1.0"
 authors = ["Yury <yury.yukhananov@tutanota.com>"]
 edition = "2018"
+description = "Statically typed Finite State Machine implementation"
+license = "MIT OR Apache-2.0"
 
 [lib]
 proc-macro = true

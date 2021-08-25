@@ -286,7 +286,10 @@ use convert_case::{Case, Casing};
 
 #[proc_macro]
 pub fn fsm(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
-	let mut fsm_parsed = parse_macro_input!(input as FSMParser);
+  #[cfg(feature = "meta_iter")]
+  let mut fsm_parsed = parse_macro_input!(input as FSMParser);
+  #[cfg(not(feature = "meta_iter"))]
+  let fsm_parsed = parse_macro_input!(input as FSMParser);
 
   let state_variants: Vec<Ident> = fsm_parsed.state_enum_tokens
     .iter()
@@ -365,6 +368,7 @@ impl StateOption {
       Self::AnyState => None,
     }
   }
+  #[allow(dead_code)]
   fn as_option(&self) -> Option<&Ident> {
     match self {
       Self::SomeState(ref state) => Some(state),
@@ -1005,6 +1009,7 @@ impl ToTokens for ChainIterItemDecl {
   }
 }
 
+#[cfg(feature = "meta_iter")]
 fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
 
   use std::str::FromStr;
