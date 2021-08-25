@@ -1,0 +1,19 @@
+[package]
+name = "fi-night"
+version = "0.1.0"
+authors = ["Yury <yury.yukhananov@tutanota.com>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+syn = {version = "1.0.74", features = ["full", "extra-traits"]}
+quote = "1.0.9"
+proc-macro2 = "1.0.28"
+convert_case = "0.4.0"
+
+[features]
+meta_iter = []
