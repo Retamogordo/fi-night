@@ -5,6 +5,8 @@ authors = ["Yury <yury.yukhananov@tutanota.com>"]
 edition = "2018"
 description = "Statically typed Finite State Machine implementation"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Retamogordo/fi-night"
+keywords = ["finite", "state", "machine", "template", "static"]
 
 [lib]
 proc-macro = true
