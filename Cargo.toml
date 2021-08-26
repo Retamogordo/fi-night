@@ -1,12 +1,12 @@
 [package]
 name = "fi-night"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Yury <yury.yukhananov@tutanota.com>"]
 edition = "2018"
 description = "Statically typed Finite State Machine implementation"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Retamogordo/fi-night"
-keywords = ["finite", "state", "machine", "template", "static"]
+keywords = ["finite", "state", "machine", "fsm", "static"]
 
 [lib]
 proc-macro = true
