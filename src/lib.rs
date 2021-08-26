@@ -812,7 +812,6 @@ fn quote_transition_handler(input: proc_macro::TokenStream, conditional: bool) -
       }
  
   };
-//  println!(" +++++++++++ {}", tr_quoted);
   (TokenStream::from(tr_quoted.into_token_stream())).into()
 }
 
@@ -934,7 +933,6 @@ fn quote_fsm_template(parser: &FSMParser) -> TokenStream {
 
   let output = TokenStream::from(quoted.into_token_stream());
 
-//  println!("output: {}", output.to_string());
   output
 }
 
@@ -1155,12 +1153,8 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
     }
   };
     
-  println!("------------{}", quoted);
-
-  let output = TokenStream::from(quoted.into_token_stream());
-
-return output;
-
+ 
+  TokenStream::from(quoted.into_token_stream())
 }
 
 struct ImplEnumDisplay {
