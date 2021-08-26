@@ -1,6 +1,6 @@
 [package]
 name = "fi-night"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Yury <yury.yukhananov@tutanota.com>"]
 edition = "2018"
 description = "Statically typed Finite State Machine implementation"
