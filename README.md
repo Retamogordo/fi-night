@@ -283,7 +283,19 @@ As there is no dynamic data manipulation involved except user defined state cont
 }
 ```
  The result of printout will be a list machine's transitions. 
- Note that there is almost no chance that the list printout coincide with yours machine layout view in source code.
+ Note that there is almost no chance that the list printout coincide with yours machine layout   view in source code.
+ 
+## fsm_gen_code Feature
+
+When on this feature generates a string containing the Rust text created by the macro.
+The string is in format of an fsm's name concatenated with _GEN_CODE identifier.
+For example for MyMachine the string is accessed by 
+ 
+```rust,ignore
+crate::MY_MACHINE_GEN_CODE 
+```
+constant.
+
  
  ## Caveats
  
