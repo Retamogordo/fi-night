@@ -8,7 +8,7 @@
 //!       (StateA, Event1) => StateB,
 //!       // and generally on:
 //!       //(State#i, Event#j) => State#k,
-//!       (_, _) => SomeState
+//!       (_, _) => SomeVariant
 //!     };
 //! ```
 //! From a programmer's perspetive an FSM could be seen as a black box which reacts on Events from
@@ -264,6 +264,17 @@
 //! The result of printout will be a list machine's transitions. Note that there is almost no chance
 //! that the list printout coincide with yours machine layout view in source code.
 //! 
+//! ## fsm_gen_code Feature
+//! When on this feature generates a string containing the Rust text created by the macro.
+//! The string is in format of an fsm's name concatenated with _GEN_CODE identifier.
+//! For example for MyMachine the string is accessed by 
+//! 
+//! ```rust,ignore
+//! crate::MY_MACHINE_GEN_CODE 
+//! ```
+//! constant.
+//! 
+//!   
 //! ## Caveats
 //! 
 //! Lifetime parsing for user data type is not covered, so this won't compile:
@@ -274,12 +285,12 @@
 //! 
 extern crate proc_macro;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, BinaryHeap};
 
 use proc_macro2::{Span, TokenStream};
 use syn::parse::{Parse, ParseStream, Result};
-use syn::{ parse_macro_input, bracketed, parenthesized, token, Token, Ident, Type, Block, 
-  GenericArgument, AngleBracketedGenericArguments,
+use syn::{ parse_macro_input, bracketed, parenthesized, token, Token, Ident, Type, Block, Expr, 
+  GenericArgument, AngleBracketedGenericArguments, PathArguments,
 };
 use quote::{quote, ToTokens};
 use convert_case::{Case, Casing};
@@ -323,14 +334,28 @@ pub fn fsm(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
   output.extend( TokenStream::from(signal_enum_tokens.into_token_stream()) );
 
   let quoted = quote_fsm_template(&fsm_parsed);
+
+//  println!("{}", quoted);
  
   output.extend( TokenStream::from(quoted.into_token_stream()) );
   
   #[cfg(feature = "meta_iter")]
   {
-  let quoted = quote_iter_chains(&mut fsm_parsed);
+    let quoted = quote_iter_chains(&mut fsm_parsed);
 
-  output.extend( TokenStream::from(quoted.into_token_stream()) );
+    output.extend( TokenStream::from(quoted.into_token_stream()) );
+  }
+
+  #[cfg(feature = "fsm_gen_code")]
+  {
+    let gen_code_const = Ident::new(
+      &format!("{}_GEN_CODE", fsm_parsed.name.to_string().to_case(Case::UpperSnake)), Span::call_site());
+    let gen_code = output.to_string();
+    let quoted_gen_code = quote! { 
+      const #gen_code_const: &str = #gen_code;
+    };
+
+    output.extend( quoted_gen_code );
   }
 
   output.into()
@@ -338,96 +363,208 @@ pub fn fsm(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
 
 #[proc_macro]
 pub fn transition_handler(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
-  quote_transition_handler(input, false)
+  quote_transition_handler(input, HandlerSignature::Deterministic)
 }
 
 #[proc_macro]
 pub fn conditional_handler(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
-  quote_transition_handler(input, true)
+  quote_transition_handler(input, HandlerSignature::Conditional)
 }
-
+/*
+#[proc_macro]
+pub fn stackful_conditional_handler(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
+  quote_transition_handler(input, HandlerSignature::Stackful)
+}
+*/
 #[proc_macro]
 pub fn from_any_state_transition_handler(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
   let mut input1 = TokenStream::from((Ident::new("_", Span::call_site())).into_token_stream());
 
   input1.extend(TokenStream::from((Ident::new("on", Span::call_site())).into_token_stream()));
   input1.extend(TokenStream::from(input));
-  quote_transition_handler(input1.into(), false)
+  quote_transition_handler(input1.into(), HandlerSignature::Deterministic)
+}
+
+enum HandlerSignature {
+  Deterministic,
+  Conditional,
+//  Stackful,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum StackOp {
+  CompareAndPop(Expr),
+  CompareAndPopIfLast(Expr),
+  PeekAndCompare(Expr),
+  PopAny,
+  PopLastAny,
+  IsEmpty,
+  NotEmpty,
+  None,
 }
 
 #[derive(Clone)]
-enum StateOption {
-  SomeState(Ident),
-  AnyState,
+enum EnumIdentAcceptingAny {
+  SomeVariant(Ident),
+  AnyVariant(Ident),
 }
 
-impl StateOption {
-  fn into_option(self) -> Option<Ident> {
+impl EnumIdentAcceptingAny {
+  fn is_any(&self) -> bool {
     match self {
-      Self::SomeState(state) => Some(state),
-      Self::AnyState => None,
+      Self::SomeVariant(_) => false,
+      Self::AnyVariant(_) => true,
     }
   }
-  #[allow(dead_code)]
-  fn as_option(&self) -> Option<&Ident> {
+  fn any() -> Self {
+    Self::AnyVariant(Ident::new("_", Span::call_site()))
+  }
+  fn unwrap_any(self) -> Ident {
+//    let any_ident = Ident::new("_", Span::call_site());
+
     match self {
-      Self::SomeState(ref state) => Some(state),
-      Self::AnyState => None,
+      Self::SomeVariant(var) => var,
+      Self::AnyVariant(any_var) => any_var,
+    }
+  }
+  fn unwrap_as_ref(&self) -> &Ident {
+    match self {
+      Self::SomeVariant(var) => var,
+      Self::AnyVariant(any_var) => any_var,
     }
   }
 }
 
-#[derive(PartialEq, Eq, Hash)]
-struct StateSignalToken(Ident, Ident);
+impl PartialEq for EnumIdentAcceptingAny {
+  fn eq(&self, other: &Self) -> bool {
+    if let EnumIdentAcceptingAny::SomeVariant(st1) = self {
+      if let EnumIdentAcceptingAny::SomeVariant(st2) = other {st1 == st2} else {false}
+    } else {
+      other.is_any()
+    }
+  }
+}
+impl Eq for EnumIdentAcceptingAny {}
 
-#[derive(Clone)]
-struct MatchTransitionEntry(StateOption, Ident, Option<Type>, Option<Ident>, bool);
+#[derive(Clone, PartialEq, Eq)]
+struct MatchTransitionEntry {
+  from_state: EnumIdentAcceptingAny,
+  signal: EnumIdentAcceptingAny,
+  input: Option<Type>,
+  stack_expr: StackOp,
+  to_state: Option<Ident>,
+}
+
+impl std::cmp::PartialOrd for EnumIdentAcceptingAny {
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+      match self {
+        Self::AnyVariant(_) 
+          => if other.is_any() {Some(std::cmp::Ordering::Equal)} else {Some(std::cmp::Ordering::Less)},
+        Self::SomeVariant(v1) 
+          => if other.is_any() {Some(std::cmp::Ordering::Greater)} else {v1.partial_cmp(other.unwrap_as_ref())},
+      }  
+  }
+}
+
+impl Ord for EnumIdentAcceptingAny {
+  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    self.partial_cmp(other).unwrap()
+  }
+}
+
+impl std::cmp::PartialOrd for StackOp {
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+      match self {
+        Self::None 
+          => if let Self::None = other {Some(std::cmp::Ordering::Equal)} else {Some(std::cmp::Ordering::Less)},
+          Self::PopAny => match other {
+            Self::None => Some(std::cmp::Ordering::Greater),
+            Self::PopAny => Some(std::cmp::Ordering::Equal),
+            _ => Some(std::cmp::Ordering::Less),
+          },
+          Self::PopLastAny => match other {
+            Self::None | Self::PopAny => Some(std::cmp::Ordering::Greater),
+            Self::PopLastAny => Some(std::cmp::Ordering::Equal),
+            _ => Some(std::cmp::Ordering::Less),
+          },
+          Self::IsEmpty => match other {
+            Self::None | Self::PopAny | Self::PopLastAny => Some(std::cmp::Ordering::Greater),
+            Self::IsEmpty => Some(std::cmp::Ordering::Equal),
+            _ => Some(std::cmp::Ordering::Less),
+          },
+          Self::NotEmpty => match other {
+            Self::None | Self::PopAny | Self::PopLastAny | Self::IsEmpty => Some(std::cmp::Ordering::Greater),
+            Self::NotEmpty => Some(std::cmp::Ordering::Equal),
+            _ => Some(std::cmp::Ordering::Less),
+          },
+          Self::CompareAndPop(_) => match other {
+            Self::None | Self::PopAny | Self::PopLastAny | Self::IsEmpty | Self::NotEmpty => Some(std::cmp::Ordering::Greater),
+            Self::CompareAndPop(_) => None,
+            _ => Some(std::cmp::Ordering::Less),
+          },
+          Self::CompareAndPopIfLast(_) => match other {
+            Self::CompareAndPopIfLast(_) => None,
+            Self::PeekAndCompare(_) => Some(std::cmp::Ordering::Less),
+            _ => Some(std::cmp::Ordering::Greater),
+          },
+          Self::PeekAndCompare(_) => match other {
+            Self::PeekAndCompare(_) => None,
+            _ => Some(std::cmp::Ordering::Greater),
+          },
+      }  
+  }
+}
+
+impl std::cmp::PartialOrd for MatchTransitionEntry {
+  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    let ord_by_from_state = self.from_state.cmp(&other.from_state);
+    if ord_by_from_state != std::cmp::Ordering::Equal { return Some(ord_by_from_state.reverse()); }
+    let ord_by_signal = self.signal.cmp(&other.signal);
+    if ord_by_signal != std::cmp::Ordering::Equal { return Some(ord_by_signal.reverse()); }
+    self.stack_expr.partial_cmp(&other.stack_expr).map(|ord| ord.reverse())
+//    if ord_by_stack_expr != std::cmp::Ordering::Equal { return Some(ord_by_stack_expr); }
+  }
+}
+
+impl Ord for MatchTransitionEntry {
+  fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    if let Some(ord) = self.partial_cmp(other) {ord} else {std::cmp::Ordering::Less}
+  }
+}
 
 impl ToTokens for MatchTransitionEntry {
   fn to_tokens(&self, tokens: &mut TokenStream) {
-    let any_state_ident = Ident::new("_", Span::call_site());
-    let state = match self.0 {
-      StateOption::SomeState(ref state) => state,
-      StateOption::AnyState => &any_state_ident,
-    };
-    let signal = &self.1;
-    let input = &self.2;
-    let to_state = &self.3;
-    let with_data = self.4;
+    let state = &self.from_state.unwrap_as_ref();
+    let signal = &self.signal.unwrap_as_ref();
+    let stack_expr = &self.stack_expr;
 
-    let cb_token = callback_ident(state, signal);
+    let cb_token = &callback_ident(state, signal, stack_expr);
+    let data_arg = quote! { &mut self.data };
+    let stack_arg = quote! { &mut self.stack };
+    let return_quoted = if let Some(ref to) = self.to_state {quote! {; #to}} else { quote! {} };
+    let pop_match_guard 
+      = match stack_expr {
+        StackOp::CompareAndPop(expr) => quote! {if if let Some(val) = self.stack.last() {
+          if &#expr == val { self.stack.pop(); true } else { false }
+        } else {false}},
+        StackOp::CompareAndPopIfLast(expr) => quote! {if if let Some(val) = self.stack.last() {
+          if &#expr == val && self.stack.len() == 1 { self.stack.pop(); true } else { false }
+        } else {false}},
+        StackOp::PeekAndCompare(expr) => quote! {if if let Some(val) = self.stack.last() {
+          { &#expr == val } } else {false}},
+        StackOp::IsEmpty => quote! { if 0 == self.stack.len() },
+        StackOp::NotEmpty => quote! { if 0 != self.stack.len() },
+        StackOp::PopAny => quote! {if if let Some(_) = self.stack.pop() {true} else {false}},
+        StackOp::PopLastAny => quote! {if 1 == self.stack.len() {self.stack.pop(); true} else {false}},
+        StackOp::None => quote! {},
+    }; 
 
     let quoted =
-      if let Some(_) = input {
-        if with_data {
-          if let Some(to) = to_state {
-            quote! { (#state, #signal(input)) => { (Self::#cb_token)(input, &mut self.data); #to } } 
-          } else {
-            quote! { (#state, #signal(input)) => { (Self::#cb_token)(input, &mut self.data) } } 
-          }
-        } else {
-           if let Some(to) = to_state {
-            quote! { (#state, #signal(input)) => { (Self::#cb_token)(input, &mut ()); #to } } 
-          } else {
-            quote! { (#state, #signal(input)) => { (Self::#cb_token)(input, &mut ()) } } 
-          }
-        }
+      if let Some(_) = self.input {
+        quote! { (#state, #signal(input)) #pop_match_guard => { (Self::#cb_token)(input, #data_arg, #stack_arg) #return_quoted } } 
   
       } else {     
-          if with_data {
-            if let Some(to) = to_state {
-              quote! { (#state, #signal) => { (Self::#cb_token)(&mut self.data); #to } }
-            } else {
-              quote! { (#state, #signal) => { (Self::#cb_token)(&mut self.data) } }
-            }
-  
-          } else {
-            if let Some(to) = to_state {
-              quote! { (#state, #signal) => { (Self::#cb_token)(&mut ()); #to } }
-            } else {
-              quote! { (#state, #signal) => { (Self::#cb_token)(&mut ()) } }
-            }
-          }
+        quote! { (#state, #signal) #pop_match_guard  => { (Self::#cb_token)(#data_arg, #stack_arg) #return_quoted } }
       };
   
     quoted.to_tokens(tokens);
@@ -455,11 +592,37 @@ impl ToTokens for SignalEnumToken {
   }
 }
 
-fn callback_ident(state: &Ident, signal: &Ident) -> Ident {
+fn callback_ident(state: &Ident, signal: &Ident, stack_expr: &StackOp) -> Ident {
+
+  let pop_expr_conv =
+    match stack_expr {
+      StackOp::CompareAndPop(expr) => {
+        let str = &(quote!{#expr}).to_string();
+        
+        let re = regex::Regex::new(r"[^A-Za-z_0-9]").unwrap();
+        format!("popped_{}", re.replace_all(str, "_").to_owned())
+      },
+      StackOp::CompareAndPopIfLast(expr) => {
+        let str = &(quote!{#expr}).to_string();
+        
+        let re = regex::Regex::new(r"[^A-Za-z_0-9]").unwrap();
+        format!("popped_last_{}", re.replace_all(str, "_").to_owned())
+      },
+      StackOp::PeekAndCompare(expr) => {
+        let str = &(quote!{#expr}).to_string();
+        
+        let re = regex::Regex::new(r"[^A-Za-z_0-9]").unwrap();
+        format!("peek_{}", re.replace_all(str, "_").to_owned())
+      },
+      StackOp::IsEmpty => "empty".to_string(),
+      StackOp::NotEmpty => "notempty".to_string(),
+      _ => "".to_string(),
+    };
   Ident::new(
-    &format!("{}_on_{}", 
+    &format!("{}_on_{}_{}", 
       state.to_string().to_case(Case::Snake),
-      signal.to_string().to_case(Case::Snake)),
+      signal.to_string().to_case(Case::Snake),
+      pop_expr_conv.to_case(Case::Snake)),
       Span::call_site()
   )
 }
@@ -467,36 +630,17 @@ fn callback_ident(state: &Ident, signal: &Ident) -> Ident {
 struct TransitionHandlerArgsParser {
   fsm_ident: Ident,
   body_item: Block,
-  state_signal_pair: StateSignalPair,
+  signature: TransitionSignature,
 }
 
 impl Parse for TransitionHandlerArgsParser {
   fn parse(input: ParseStream) -> Result<Self> {
 
-    match input.parse()? {
-      StateSignalPairParser::ChainJoint(state_signal_pairs)
-      |
-      StateSignalPairParser::FromAnyStateChainStart(state_signal_pairs) => {
-        if state_signal_pairs.len() > 1 {
-          panic!("Only one signal variant must be used for transition signature");
-        }
-
-        let state_signal_pair = state_signal_pairs[0].clone();
-        let _: Token![for] = input.parse()?;
-        let fsm_ident: Ident = input.parse()?;
-        
-        let body_item: Block = input.parse()?;
-    
-        Ok(Self { 
-          state_signal_pair,
-          fsm_ident,
-          body_item,
-        })
-      },
-      _ => {
-        panic!("Invalid transition");
-      }
-    }
+    Ok(Self { 
+      signature: input.parse()?,
+      fsm_ident: { input.parse::<Token![for]>()?; input.parse()? },
+      body_item: input.parse()?,
+    })
   }
 }
 
@@ -505,8 +649,7 @@ struct FSMParser {
   state_enum_ident: Ident,
   signal_enum_ident: Ident,
   data_type: Option<Type>,
-//  transition_tokens: HashMap<StateSignalToken, Option<Ident>>,
-//  any_state_transition_tokens: HashMap<Ident, Option<Ident>>,
+  stack_sym_type: Option<Type>,
   signal_enum_tokens: HashMap<Ident, Option<Type>>,
   state_enum_tokens: HashSet<Ident>,
   match_transition_tokens: Vec<MatchTransitionEntry>,
@@ -516,11 +659,17 @@ impl Parse for FSMParser {
     fn parse(input: ParseStream) -> Result<Self> {
         let name: Ident = input.parse()?;
         let mut data_type: Option<Type> = None;
-        if let Ok(mut type_arg) = input.parse::<AngleBracketedGenericArguments>() {
-          data_type = Some(
-            match type_arg.args.pop().unwrap().into_value() {
+        let mut stack_sym_type: Option<Type> = None;
+        if let Ok(type_args) = input.parse::<AngleBracketedGenericArguments>() {
+          let mut args_iter = type_args.args.into_pairs();
+          data_type = args_iter.next().map(|arg| match arg.into_value() {
               GenericArgument::Type(t) => t,
-              _ => panic!("Not a type"),
+              _ => panic!("Type argument expected for DataItem"),
+            }
+          );
+          stack_sym_type = args_iter.next().and_then(|arg| match arg.into_value() {
+              GenericArgument::Type(t) => Some(t),
+              _ => panic!("Type argument expected for StackSymbolItem"),
             }
           );
         }
@@ -530,110 +679,75 @@ impl Parse for FSMParser {
         
         let mut signal_enum_tokens = HashMap::new();
         let mut state_enum_tokens = HashSet::new();
-        let mut transition_tokens = HashMap::new();
-        let mut any_state_transition_tokens = HashMap::new();
+        let mut match_transition_tokens = BinaryHeap::new();
+//        let mut any_state_transition_tokens = HashMap::new();
 
         let content;
         bracketed!(content in input);
+        let mut transition_signature: TransitionSignature = content.parse()?;
+        let mut from_state;
 
-        let mut pair_parser: StateSignalPairParser = content.parse()?;
-        
         while !content.is_empty() {
-          match pair_parser {
-            StateSignalPairParser::ChainJoint(ref mut pairs) => {
+            match transition_signature.signature_kind {
+            TransitionSignatureKind::ChainJoint => {
+              from_state = transition_signature.from_state.clone();
 
-                let _: Token![=>] = content.parse()?;
+              let _: Token![=>] = content.parse()?;
 
-                let from_state = pairs[0].from_state.clone();
-                let curr_pairs = pairs.drain(..).collect::<Vec<StateSignalPair>>();
+              let curr_pairs = transition_signature.signals.drain(..).collect::<Vec<(EnumIdentAcceptingAny, Option<Type>)>>();
 
-                pair_parser = content.parse()?;
-                let to_state = match pair_parser {
-                  StateSignalPairParser::ChainJoint(ref mut next_pairs) => next_pairs[0].from_state.clone(),
-                  StateSignalPairParser::ChainEnd(ref mut state) => Some(state.clone()),
-                  StateSignalPairParser::ConditionalTransition => None,
-                  StateSignalPairParser::FromAnyStateChainStart(_) => panic!("AnyState pattern is allowed only at start of transition chain"),
+              let next_transition_signature: TransitionSignature = content.parse()?;
+              let to_state = match next_transition_signature.signature_kind {
+                  TransitionSignatureKind::ChainEndConditional => None, 
+                  _ => Some(next_transition_signature.from_state.clone().unwrap_any()),
                 };
-
-                for mut pair in curr_pairs {
-                  let signal = pair.signal.0.clone();
-                  let input_type = pair.signal.1.take();  
-                  let state_signal_token = StateSignalToken(from_state.clone().unwrap(), signal.clone());       
-
-                  if transition_tokens.get(&state_signal_token).is_none() {
-                      transition_tokens.insert(state_signal_token, to_state.clone());
-                  } else {
-                    panic!("({}, {}) conflicts with existing transition.", from_state.unwrap(), signal)
-                  }
                 
-                  let input_type_clone = input_type.clone();
-                  signal_enum_tokens.entry(signal.clone())
+              for mut pair in curr_pairs {
+                let stack_expr = transition_signature.stack_expr.clone();
+                let signal = pair.0.clone();
+                let mut input_type = pair.1.take();  
+              
+                let input_type_clone = input_type.clone();
+                if let EnumIdentAcceptingAny::SomeVariant(ref sig) = signal {
+                  signal_enum_tokens.entry(sig.clone())
                     .and_modify(|t: &mut Option<Type>| 
                       if t.is_none() {
-                        *t = input_type;
+                        *t = input_type.clone();
                       } else {
                         if !input_type.is_none() {
-                          panic!("Signal enum variant {}(Type2) conflicts with existing variant {}(Type1). You can use empty variant {} to continue making transitions with this signal.", 
-                          signal, signal, signal);
+//                           panic!("Signal enum variant {}(Type2) conflicts with existing variant {}(Type1). You can use empty variant {} to continue making transitions with this signal.", 
+//                           sig, sig, sig);
+                        } else {
+                          input_type = t.clone();
                         }
                       }
                     )
                     .or_insert(input_type_clone);
-                  state_enum_tokens.insert(from_state.clone().unwrap());
-                  if let Some(to) = to_state.clone() {
-                    state_enum_tokens.insert(to);
-                  }
                 }
-            },
-            StateSignalPairParser::FromAnyStateChainStart(ref mut pairs) => {
-              let _: Token![=>] = content.parse()?;
+                match_transition_tokens.push(MatchTransitionEntry {
+                  from_state: from_state.clone(),
+                  signal: signal.clone(),
+                  input: input_type.clone(),
+                  stack_expr: stack_expr.clone(),
+                  to_state: to_state.clone(),
+                });
 
-              let curr_pairs = pairs.drain(..).collect::<Vec<StateSignalPair>>();
-
-              pair_parser = content.parse()?;
-              let to_state = match pair_parser {
-                StateSignalPairParser::ChainJoint(ref mut next_pairs) => next_pairs[0].from_state.clone(),
-                StateSignalPairParser::ChainEnd(ref mut state) => Some(state.clone()),
-                StateSignalPairParser::ConditionalTransition => None,
-                StateSignalPairParser::FromAnyStateChainStart(_) => panic!("AnyState pattern is allowed only at start of transition chain"),
-              };
-
-              for mut pair in curr_pairs {
-                let signal = pair.signal.0.clone();
-                let input_type = pair.signal.1.take();  
-
-                if any_state_transition_tokens.get(&signal).is_none() {
-                  any_state_transition_tokens.insert(signal.clone(), to_state.clone());
-                } else {
-                  panic!("(_, {}) conflicts with existing transition.", signal)
+                if let EnumIdentAcceptingAny::SomeVariant(ref from) = from_state {
+                  state_enum_tokens.insert(from.clone());
                 }
-              
-                let input_type_clone = input_type.clone();
-                signal_enum_tokens.entry(signal.clone())
-                  .and_modify(|t: &mut Option<Type>| 
-                    if t.is_none() {
-                      *t = input_type;
-                    } else {
-                      if !input_type.is_none() {
-                        panic!("Signal enum variant {}(Type2) conflicts with existing variant {}(Type1). You can use empty variant {} to continue making transitions with this signal.", 
-                        signal, signal, signal);
-                      }
-                    }
-                  )
-                  .or_insert(input_type_clone);
-                if let Some(to) = to_state.clone() {
-                  state_enum_tokens.insert(to);
+                if let Some(ref to) = to_state {
+                  state_enum_tokens.insert(to.clone());
                 }
               }
+              transition_signature = next_transition_signature;
             },
-
-            StateSignalPairParser::ChainEnd(_)
+            TransitionSignatureKind::ChainEnd
             |
-            StateSignalPairParser::ConditionalTransition => {
+            TransitionSignatureKind::ChainEndConditional => {
+              if !content.is_empty() {
+                content.parse::<Token![,]>()?;
                 if !content.is_empty() {
-                  content.parse::<Token![,]>()?;
-                if !content.is_empty() {
-                  pair_parser = content.parse()?;
+                  transition_signature = content.parse()?;
                 }
               }
             },
@@ -643,174 +757,192 @@ impl Parse for FSMParser {
         if state_enum_tokens.len() == 0 {
           panic!("Stateless State Machine ???");
         }
-
-        let mut match_transition_tokens = transition_tokens.iter()
-        .map(|(state_signal, to_state)| 
-          MatchTransitionEntry(
-            StateOption::SomeState(state_signal.0.clone()), 
-            state_signal.1.clone(), 
-            signal_enum_tokens.get(&state_signal.1).unwrap().clone(),
-            to_state.clone(),
-            data_type.is_some()),
-        )
-        .collect::<Vec<MatchTransitionEntry>>();
-        match_transition_tokens.extend( 
-          any_state_transition_tokens.iter()
-          .map(|(signal, to_state)| 
-            MatchTransitionEntry(
-              StateOption::AnyState, 
-              signal.clone(), 
-              signal_enum_tokens.get(&signal).unwrap().clone(),
-              to_state.clone(),
-              data_type.is_some()),
-          )
-          .collect::<Vec<MatchTransitionEntry>>()
-        );
-    
-
+        let match_transition_tokens = match_transition_tokens.into_sorted_vec();
+        let _quoted = quote! {
+          #(#match_transition_tokens)*,
+        };
+//        println!("{}", _quoted);
         Ok(Self { 
           name, 
           data_type, 
+          stack_sym_type,
           state_enum_ident,
           signal_enum_ident,
           signal_enum_tokens,
           state_enum_tokens,
-//          transition_tokens,
-//          any_state_transition_tokens,
           match_transition_tokens,
-         })
+        })
     }
 }
-#[derive(Clone)]
-struct StateSignalPair {
-  from_state: Option<Ident>,
-  signal: (Ident, Option<Type>),
-//  signal_input_type: Option<Type>,
+
+enum TransitionSignatureKind {
+  ChainJoint,
+  ChainEnd,
+  ChainEndConditional,
 }
 
-enum StateSignalPairParser {
-  ChainEnd(Ident),
-  ChainJoint(Vec<StateSignalPair>),
-  FromAnyStateChainStart(Vec<StateSignalPair>),
-  ConditionalTransition,
+struct TransitionSignature {
+  signature_kind: TransitionSignatureKind,
+  from_state: EnumIdentAcceptingAny,
+  signals: Vec<(EnumIdentAcceptingAny, Option<Type>)>,
+  stack_expr: StackOp,
 }
-
-impl Parse for StateSignalPairParser {
-  fn parse(input: ParseStream) -> Result<Self> {
-      if let Ok(_) = input.parse::<Token![?]>() {
-        return Ok(Self::ConditionalTransition);
-      }
-
-      let from_state: StateOption = if input.lookahead1().peek(Token![_]) {
-        input.parse::<Token![_]>()?;
-        StateOption::AnyState
-      } else {
-        StateOption::SomeState(input.parse()?)
-      };
-      
-      let on_ident_parse_res = input.parse::<Ident>();
-      if on_ident_parse_res.is_err() {
-        return Ok(Self::ChainEnd(from_state.into_option().unwrap()));
-      }
-      let on_ident = on_ident_parse_res.unwrap();
-      if on_ident != "on" {
-        panic!("on == {}, should be 'on'", on_ident);
-      }
-
-      let signals_set_parsed;
-      let content;
-      let single_signal = 
-        if input.lookahead1().peek(token::Paren) {
-          parenthesized!(content in input);
-          signals_set_parsed = &content;
-          false
-        } else { 
-          signals_set_parsed = input;
-          true
-        };
-
-      let mut signal_input_type: Option<Type>;
-      let mut signal: Ident;
-      let mut pairs = Vec::new();
-      let mut done = signals_set_parsed.is_empty();
-      while !done {
-        signal = signals_set_parsed.parse()?;
-
-        signal_input_type =
-          if signals_set_parsed.lookahead1().peek(token::Paren) {
-            let signal_input_type_tokens;
-            parenthesized!(signal_input_type_tokens in signals_set_parsed);
-            Some(signal_input_type_tokens.parse()?)
-          } else { None };
-
-          pairs.push( 
-            StateSignalPair { 
-              from_state: from_state.clone().into_option(),
-              signal: (signal, signal_input_type)
-             }
-          );   
-          done = single_signal || signals_set_parsed.is_empty(); 
-          if !done {
-            signals_set_parsed.parse::<Token![|]>()?;
-          }
-        }
-      Ok( match from_state {
-        StateOption::SomeState(_) => Self::ChainJoint(pairs),
-        StateOption::AnyState => Self::FromAnyStateChainStart(pairs),
-      })
+impl TransitionSignature {
+  fn parse_pop_token(input: &ParseStream) -> Result<StackOp> {
+    let negated = input.lookahead1().peek(Token![!]);
+    if negated { input.parse::<Token![!]>()?; }
+    if input.lookahead1().peek(Ident) {
+      let res = input.parse::<Ident>()?;
+      match res.to_string().as_str()  {
+        "cmp_pop_if_last" => Ok(
+          if input.lookahead1().peek(Token![_]) { input.parse::<Token![_]>()?; StackOp::PopLastAny }
+          else { StackOp::CompareAndPopIfLast(input.parse::<Expr>()?) }
+        ),
+        "cmp_pop" => Ok(
+          if input.lookahead1().peek(Token![_]) { input.parse::<Token![_]>()?; StackOp::PopAny }
+          else { StackOp::CompareAndPop(input.parse::<Expr>()?) }
+        ),
+        "peek_cmp" => Ok( StackOp::PeekAndCompare(input.parse::<Expr>()?) ),
+        "pop" => Ok(StackOp::PopAny),
+        "empty" => Ok(if negated {StackOp::NotEmpty} else {StackOp::IsEmpty}),
+        str @ _ => panic!("Unrecognized stack operation parsed: {}", str),
+      } 
+    } 
+    else {
+      Ok(StackOp::None)
+    }
   }
 }
 
-fn quote_transition_handler(input: proc_macro::TokenStream, conditional: bool) -> proc_macro::TokenStream {
+impl Parse for TransitionSignature {
+  fn parse(input: ParseStream) -> Result<Self> {
+    if let Ok(_) = input.parse::<Token![?]>() {
+      return Ok(Self {
+        signature_kind: TransitionSignatureKind::ChainEndConditional,
+        from_state: EnumIdentAcceptingAny::any(),
+        signals: vec![],
+        stack_expr: StackOp::None,
+      });
+    }
+
+    let from_state: EnumIdentAcceptingAny = if input.lookahead1().peek(Token![_]) {
+      input.parse::<Token![_]>()?;
+
+      EnumIdentAcceptingAny::any()
+    } else {
+      if let Ok(ty) = input.parse::<Type>() {
+        match ty {
+          Type::Path(path) => EnumIdentAcceptingAny::SomeVariant(path.path.segments.last().unwrap().ident.clone()),
+          _ => EnumIdentAcceptingAny::SomeVariant(input.parse()?)
+        }
+      } else {
+        EnumIdentAcceptingAny::SomeVariant(input.parse()?)
+      }
+    };
+    
+    let on_ident_parse_res = input.parse::<Ident>();
+    if on_ident_parse_res.is_err() {
+      if from_state.is_any() {
+        panic!("Any State is not allowed as accepting state. Use ? for non-deterministic transition.");
+      }
+      return Ok(Self {
+        from_state,
+        signals: vec![],
+        stack_expr: StackOp::None,
+        signature_kind: TransitionSignatureKind::ChainEnd,
+      });
+    }
+
+    let on_ident = on_ident_parse_res.unwrap();
+    if on_ident != "on" {
+      panic!("on == {}, should be 'on'", on_ident);
+    }
+
+    let mut signal: Ident;
+
+    if input.lookahead1().peek(Token![_]) {
+      input.parse::<Token![_]>()?;
+      
+      return Ok(Self {
+        signature_kind: TransitionSignatureKind::ChainJoint,
+        from_state,
+        signals: vec![(EnumIdentAcceptingAny::any(), None)],
+        stack_expr: Self::parse_pop_token(&input).unwrap(),
+      });
+    } 
+
+    let signals_set_parsed;
+    let content;
+    let single_signal = 
+      if input.lookahead1().peek(token::Paren) {
+        parenthesized!(content in input);
+        signals_set_parsed = &content;
+        false
+      } else { 
+        signals_set_parsed = input;
+        true
+      };
+
+    let mut signal_input_type: Option<Type>;
+    let mut done = signals_set_parsed.is_empty();
+    let mut signals = vec![];
+    while !done {
+      let ty = signals_set_parsed.parse::<Type>()?;
+      signal = match ty {
+        Type::Path(path) => {
+          signal_input_type 
+          = if let PathArguments::Parenthesized(args) = path.path.segments.last().unwrap().arguments.clone() {
+            Some(args.inputs.first().unwrap().clone())
+          } else { None };
+          path.path.segments.last().unwrap().ident.clone()
+        },
+        _ => panic!("Not a valid signal type"),
+      };
+    //  println!("----------------- {} ------------------", signal);
+      signals.push( (EnumIdentAcceptingAny::SomeVariant(signal), signal_input_type) );
+          
+      done = single_signal || signals_set_parsed.is_empty(); 
+      if !done {
+        signals_set_parsed.parse::<Token![|]>()?;
+      }
+    }
+  
+    return Ok(Self {
+      signature_kind: TransitionSignatureKind::ChainJoint,
+      from_state,
+      signals,
+      stack_expr: Self::parse_pop_token(&input).unwrap(),
+    });
+
+  }
+}
+
+fn quote_transition_handler(input: proc_macro::TokenStream, signature: HandlerSignature) -> proc_macro::TokenStream {
 	let transition_parsed = parse_macro_input!(input as TransitionHandlerArgsParser);
   let fsm_ident = &transition_parsed.fsm_ident;
   let trait_ident = &trait_ident(fsm_ident);
-  let any_state_ident = &Ident::new("_", Span::call_site());
-  let state_ident = 
-    match transition_parsed.state_signal_pair.from_state {
-      Some(ref state) => state,
-      None => any_state_ident,
-  };
-  let signal_ident = &transition_parsed.state_signal_pair.signal.0;
-  let signal_input_type = &transition_parsed.state_signal_pair.signal.1;
+  let state_ident = &transition_parsed.signature.from_state.unwrap_as_ref();
+  let signal_ident = transition_parsed.signature.signals[0].0.unwrap_as_ref();
+  let signal_input_type = &transition_parsed.signature.signals[0].1;
   let body_block = &transition_parsed.body_item;
-  let handler_ident = &callback_ident(state_ident, signal_ident);
+  let handler_ident = &callback_ident(state_ident, signal_ident, &transition_parsed.signature.stack_expr);
 
-  let tr_quoted = match signal_input_type {
-    Some(input_type) => 
-      if conditional {
-        quote! {
-          impl #fsm_ident {
-            fn #handler_ident(input: &#input_type, data: &mut <Self as #trait_ident>::DataItem) -> <Self as #trait_ident>::StateItem
-              #body_block
-          }
-        }
-      } else {
-        quote! {
-          impl #fsm_ident {
-            fn #handler_ident(input: &#input_type, data: &mut <Self as #trait_ident>::DataItem)
-              #body_block
-          }
-        }
-      }
-  
-    None => 
-      if conditional {
-        quote! {
-          impl #fsm_ident {
-            fn #handler_ident(data: &mut <Self as #trait_ident>::DataItem) -> <Self as #trait_ident>::StateItem
-              #body_block
-          }  
-        }
-      } else {
-        quote! {
-          impl #fsm_ident {
-            fn #handler_ident(data: &mut <Self as #trait_ident>::DataItem)
-              #body_block
-          }  
-        }      
-      }
- 
+  let return_type = match signature {
+      HandlerSignature::Deterministic => quote! { () },
+      HandlerSignature::Conditional  => quote! { <Self as #trait_ident>::StateItem },    
+  };
+  let input_arg = match signal_input_type {
+    Some(input_type) => quote! {input: &#input_type,},
+    _ => quote! {}
+  };
+  let tr_quoted = quote! {
+    impl #fsm_ident {
+      fn #handler_ident(#input_arg 
+        data: &mut <Self as #trait_ident>::DataItem,
+        stack: &mut Vec<<Self as #trait_ident>::StackSymbolItem>,
+      ) -> #return_type
+        #body_block
+    }
   };
   (TokenStream::from(tr_quoted.into_token_stream())).into()
 }
@@ -826,38 +958,72 @@ fn quote_fsm_template(parser: &FSMParser) -> TokenStream {
   let fsm_ident = &parser.name;
   let trait_ident = trait_ident(fsm_ident);
   let data_type = &parser.data_type;
-//  let transitions = &parser.transition_tokens;
-//  let any_state_transitions = &parser.any_state_transition_tokens;
-//  let signals = &parser.signal_enum_tokens;
+  let stack_sym_type = &parser.stack_sym_type;
   let signal_enum_ident = &parser.signal_enum_ident;
   let state_enum_ident = &parser.state_enum_ident;
   let match_tr_entries = &parser.match_transition_tokens;
   let iter_item_ident = ChainIterItem::name_from_fsm(&fsm_ident);
 
+  let mut data_method_def = quote!{};
+  let mut data_mut_method_def = quote!{};
+  let mut data_method_impl = quote!{};
+  let mut data_mut_method_impl = quote!{};
+  let mut data_arg = quote!{};
+  let mut data_field_init = quote!{data: (),};
+
+  let data_type = match data_type {
+    Some(ref data_type) => {
+      data_method_def = quote! { fn data(&self) -> &<Self as #trait_ident>::DataItem; };
+      data_mut_method_def = quote! { fn data_mut(&mut self) -> &mut <Self as #trait_ident>::DataItem; };
+      data_method_impl = quote! {
+        fn data(&self) -> &<Self as #trait_ident> ::DataItem {
+          &self.data
+        }
+      };
+      data_mut_method_impl = quote! {
+        fn data_mut(&mut self) -> &mut <Self as #trait_ident> ::DataItem {
+          &mut self.data
+        }
+      };
+      data_arg = quote! { data: <Self as #trait_ident>::DataItem };
+      data_field_init = quote! {data,};
+      quote! { #data_type }
+    },
+    _ => quote! { () },
+  };
+
+  let stack_sym_type = match stack_sym_type {
+    Some(ref stack_sym_type) => quote! { #stack_sym_type },
+    _ => quote! { () },
+  };
+
   let quoted 
-    = match data_type {
-      Some(data_type) => quote! {
-        trait #trait_ident {
+      = quote! {
+        pub trait #trait_ident {
           type StateItem: PartialEq + Clone + Copy;
           type SignalItem: PartialEq;
           type DataItem;
+          type StackSymbolItem: PartialEq;
           #[cfg(feature = "meta_iter")]
           type IterItem;
-
+  
           fn signal(&mut self, signal: &Self::SignalItem);
-          fn data(&self) -> &Self::DataItem;
           fn state(&self) -> &Self::StateItem;
+          #data_method_def
+          #data_mut_method_def
         }
 
         pub struct #fsm_ident {
           state: #state_enum_ident,
-          data: #data_type,
+          data: <Self as #trait_ident>::DataItem,
+          stack: Vec<<Self as #trait_ident>::StackSymbolItem>,
         }
 
         impl #trait_ident for #fsm_ident {
           type StateItem = #state_enum_ident;
           type SignalItem = #signal_enum_ident;
           type DataItem = #data_type;
+          type StackSymbolItem = #stack_sym_type;
           #[cfg(feature = "meta_iter")]
           type IterItem = #iter_item_ident;
 
@@ -867,72 +1033,25 @@ fn quote_fsm_template(parser: &FSMParser) -> TokenStream {
               _ => self.state
             }
           }
-          fn data(&self) -> &Self::DataItem {
-            &self.data
-          }
           fn state(&self) -> &Self::StateItem {
             &self.state
           }
+          #data_method_impl
+          #data_mut_method_impl
         }
-    
         impl #fsm_ident {
-          pub fn new(state: #state_enum_ident, data: #data_type) -> Self {
+          pub fn new(state: #state_enum_ident, #data_arg) -> Self {
             Self { 
               state, 
-              data,
-             }
+              #data_field_init
+              stack: vec![],
+            }
           }
         }
     
-      },
-      None => 
-        quote! {
-          trait #trait_ident {
-            type StateItem: PartialEq + Clone + Copy;
-            type SignalItem: PartialEq;
-            type DataItem;
-            #[cfg(feature = "meta_iter")]
-            type IterItem;
-  
-            fn signal(&mut self, signal: &Self::SignalItem);
-            fn state(&self) -> &Self::StateItem;
-          }
-  
-          pub struct #fsm_ident {
-            state: #state_enum_ident,
-          }
-      
-          impl #fsm_ident {
-            pub fn new(state: #state_enum_ident) -> Self {
-              Self { 
-                state,
-              }
-            }
-          }
-  
-          impl #trait_ident for #fsm_ident {
-            type StateItem = #state_enum_ident;
-            type SignalItem = #signal_enum_ident;
-            type DataItem = ();
-            #[cfg(feature = "meta_iter")]
-            type IterItem = #iter_item_ident;
-
-            fn signal(&mut self, signal: &Self::SignalItem) {
-              self.state = match (self.state, signal) {
-                #(#match_tr_entries),*,
-                _ => self.state
-              }
-            }
-            fn state(&self) -> &Self::StateItem {
-              &self.state
-            }
-          }
-      
-        },  
-  };
-
+      };
   let output = TokenStream::from(quoted.into_token_stream());
-
+//  println!("{}", output);
   output
 }
 
@@ -1014,8 +1133,6 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
   let fsm_ident = &fsm_parsed.name;
   let chains_ident = Ident::new( &format!("{}{}", fsm_ident, "MetaChains"), Span::call_site() );
   let iter_ident = Ident::new( &format!("{}{}", fsm_ident, "MetaIter"), Span::call_site() );
- // let iter_item_ident = Ident::new( &format!("{}{}", fsm_ident, "IterItem"), Span::call_site() );
-  //let state_enum_option_ident = Ident::new( &format!("Option<{}>", fsm_parsed.state_enum_ident), Span::call_site() )
   let mut signal_variants = vec![Ident::new("ConditionalMultipleChoice", Span::call_site() )];
   signal_variants.extend( 
     fsm_parsed.signal_enum_tokens.iter().map(|(sig, _)| sig.clone()).collect::<Vec<Ident>>()
@@ -1028,16 +1145,30 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
 
   let mut chains = Vec::new();
   let mut chain_lens = Vec::new();
-  // extend AnyState to SomeState collection
+  // expand states AnyVariant to SomeVariant collection
   while let Some(index) = match_tr_entries.iter()
-    .position(|item| item.0.as_option().is_none()) {
+    .position(|item| item.from_state.is_any()) {
       let entry = match_tr_entries.swap_remove(index);
 
       match_tr_entries.extend(
         fsm_parsed.state_enum_tokens.iter()
           .map(|from| {
             let mut entry = entry.clone();
-            entry.0 = StateOption::SomeState(from.clone());
+            entry.from_state = EnumIdentAcceptingAny::SomeVariant(from.clone());
+            entry
+          })
+      );
+  }
+  // expand signals AnyVariant to SomeVariant collection
+  while let Some(index) = match_tr_entries.iter()
+    .position(|item| item.signal.is_any()) {
+      let entry = match_tr_entries.swap_remove(index);
+
+      match_tr_entries.extend(
+        fsm_parsed.signal_enum_tokens.iter()
+          .map(|sig| {
+            let mut entry = entry.clone();
+            entry.signal = EnumIdentAcceptingAny::SomeVariant(sig.0.clone());
             entry
           })
       );
@@ -1045,18 +1176,15 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
 
   while let Some(mut entry) = match_tr_entries.pop() {
     let mut chain = Vec::new();
-    let mut to_state = &entry.3;
 
     while let Some(index) = match_tr_entries.iter()
-      .position(|item| item.0.as_option() == to_state.as_ref()) {
+      .position(|item| Some(item.from_state.unwrap_as_ref()) == entry.to_state.as_ref()) {
 
-      chain.push( ChainIterItem(fsm_ident.clone(), entry.0.into_option().unwrap(), entry.1.clone(), 
-        entry.3.clone() ));
+      chain.push( ChainIterItem(fsm_ident.clone(), entry.from_state.unwrap_any(), entry.signal.unwrap_any(), 
+        entry.to_state.clone() ));
       entry = match_tr_entries.swap_remove(index);
-
-      to_state = &entry.3;
     }
-    chain.push( ChainIterItem(fsm_ident.clone(), entry.0.into_option().unwrap(), entry.1, entry.3.clone()));
+    chain.push( ChainIterItem(fsm_ident.clone(), entry.from_state.unwrap_any(), entry.signal.unwrap_any(), entry.to_state.clone()));
 
     chain_lens.push(chain.len());
     chains.extend(chain);
@@ -1085,7 +1213,7 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
 //    use #signal_iter_variants_ident::*;
       
     #[derive(Clone, Copy)]
-    pub struct #iter_item_decl;
+    pub struct #iter_item_decl
 
     impl core::fmt::Display for #signal_iter_variants_ident {
       fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -1097,16 +1225,6 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
         #state_enum_impl_display
       }
     }
-  
-/*    impl core::fmt::Display for #iter_item_name {
-      fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        match &self.to {
-          Some(thing) => write!(f, "({} on {} => {})", self.from, self.on, thing),
-          None => write!(f, "({} on {} => ?)", self.from, self.on),
-        }
-      }
-    }
-*/  
     pub struct #iter_ident {
       offset: usize,
       index: usize,
@@ -1152,8 +1270,7 @@ fn quote_iter_chains(fsm_parsed: &mut FSMParser) -> TokenStream {
       }
     }
   };
-    
- 
+     
   TokenStream::from(quoted.into_token_stream())
 }
 
