@@ -352,7 +352,7 @@ pub fn fsm(input: proc_macro::TokenStream) -> proc_macro::TokenStream  {
       &format!("{}_GEN_CODE", fsm_parsed.name.to_string().to_case(Case::UpperSnake)), Span::call_site());
     let gen_code = output.to_string();
     let quoted_gen_code = quote! { 
-      const #gen_code_const: &str = #gen_code;
+      pub const #gen_code_const: &str = #gen_code;
     };
 
     output.extend( quoted_gen_code );
