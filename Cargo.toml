@@ -6,7 +6,7 @@ edition = "2018"
 description = "Statically typed Finite State Machine and Pushdown Automaton implementation"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Retamogordo/fi-night"
-keywords = ["state", "machine", "fsm", "pushdown", "automaton"]
+keywords = ["finite-state-machine", "fsm", "pushdown-automaton", "moore-machine", "statically-typed"]
 
 [lib]
 proc-macro = true
