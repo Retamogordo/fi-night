@@ -1,6 +1,6 @@
 [package]
 name = "fi-night"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Yury <yury.yukhananov@tutanota.com>"]
 edition = "2018"
 description = "Statically typed Finite State Machine and Pushdown Automaton implementation"
